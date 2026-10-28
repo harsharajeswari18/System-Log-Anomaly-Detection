@@ -1,0 +1,1 @@
+event_count,sequence_length,duration,error_rate,label\n2,8,0.2,0.0,Normal\n3,10,0.3,0.0,Normal\n1,7,0.1,0.0,Normal\n18,50,8.5,0.8,Anomaly\n20,55,9.1,0.9,Anomaly\n2,9,0.2,0.0,Normal\n
