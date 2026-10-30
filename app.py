@@ -153,6 +153,15 @@ HTML = """
         </p>
         <p>{{ s.method }}</p>
 
+        <h3>Model comparison</h3>
+        <table>
+            <tr><th>Model</th><th>Type</th><th>Anomalies flagged</th><th>Accuracy</th><th>F1</th></tr>
+            {% for r in s.comparison %}
+            <tr><td>{{ r.model }}</td><td>{{ r.type }}</td><td>{{ r.flagged }}</td><td>{{ r.accuracy }}</td><td>{{ r.f1 }}</td></tr>
+            {% endfor %}
+        </table>
+        <br>
+
         <form action="/download" method="post">
             <input type="hidden" name="csv_data" value="{{ csv }}">
             <button type="submit">Download predictions CSV</button>
@@ -167,8 +176,10 @@ HTML = """
 
     <div class="card">
         <b>Note:</b>
-        This version uses numeric features and an Isolation Forest
-        baseline. Raw HDFS log parsing is not yet implemented.
+        Models: Linear SVM (classical ML), LSTM (deep learning) and a
+        4-qubit variational quantum classifier (quantum ML, simulated), compared
+        against an Isolation Forest baseline. Input is numeric log features;
+        raw HDFS log parsing is not yet implemented.
     </div>
 
 </main>
