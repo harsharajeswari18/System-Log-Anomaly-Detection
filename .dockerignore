@@ -1,1 +1,7 @@
-.git\n.github\n__pycache__\n.pytest_cache\n.venv\n.env\ndata/\n
+.git
+.github
+__pycache__
+.pytest_cache
+.venv
+.env
+
