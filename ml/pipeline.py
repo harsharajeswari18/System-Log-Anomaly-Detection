@@ -1,20 +1,24 @@
 """Anomaly detection pipeline: Classical ML + Deep Learning + Quantum ML.
 
-Models (all trained once on the labelled demo dataset, then applied to uploads):
-  * Linear SVM  - classical ML  (scikit-learn LinearSVC)
-  * LSTM        - deep learning (NumPy LSTM with BPTT; features fed as a sequence)
-  * VQC         - quantum ML    (4-qubit variational circuit, simulated in NumPy)
+Models:
+  * Linear SVM    - classical ML
+  * Random Forest - classical ML  (NEW)
+  * KNN           - classical ML  (NEW)
+  * LSTM          - deep learning
+  * DNN           - deep learning (NEW)
+  * VQC           - quantum ML
   * Isolation Forest - unsupervised baseline
-Final label = majority vote of the three supervised models.
+Final label = majority vote of the 5 supervised models.
 """
 from functools import lru_cache
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import IsolationForest
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
@@ -31,12 +35,15 @@ def demo_dataframe(seed=7, n=80, na=8):
     return d
 
 
-# ---------------------------------------------------------------- Linear SVM
+# Linear SVM
 class SVMModel:
     name = "Linear SVM"
 
     def fit(self, X, y):
-        self.m = make_pipeline(StandardScaler(), LinearSVC(class_weight="balanced", random_state=42, max_iter=10000))
+        self.m = make_pipeline(
+            StandardScaler(),
+            LinearSVC(class_weight="balanced", random_state=42, max_iter=10000)
+        )
         self.m.fit(X, y)
         return self
 
@@ -47,10 +54,48 @@ class SVMModel:
         return self.m.decision_function(X)
 
 
-# ---------------------------------------------------------------------- LSTM
+# Random Forest
+class RandomForestModel:
+    name = "Random Forest"
+
+    def fit(self, X, y):
+        self.sc = StandardScaler().fit(X)
+        self.m = RandomForestClassifier(
+            n_estimators=200,
+            max_depth=8,
+            class_weight="balanced",
+            random_state=42,
+        )
+        self.m.fit(self.sc.transform(X), y)
+        return self
+
+    def predict(self, X):
+        return self.m.predict(self.sc.transform(X))
+
+    def score(self, X):
+        return self.m.predict_proba(self.sc.transform(X))[:, 1]
+
+
+# KNN
+class KNNModel:
+    name = "KNN"
+
+    def fit(self, X, y):
+        self.sc = StandardScaler().fit(X)
+        self.m = KNeighborsClassifier(n_neighbors=5, weights="distance")
+        self.m.fit(self.sc.transform(X), y)
+        return self
+
+    def predict(self, X):
+        return self.m.predict(self.sc.transform(X))
+
+    def score(self, X):
+        return self.m.predict_proba(self.sc.transform(X))[:, 1]
+
+
+# LSTM
 class LSTMModel:
-    """Single-layer LSTM (NumPy, manual backprop-through-time + Adam).
-    The 4 standardised features are fed as a length-4 sequence."""
+    """Single-layer LSTM (NumPy, manual BPTT + Adam)."""
     name = "LSTM"
     H = 8
 
@@ -65,8 +110,8 @@ class LSTMModel:
         for t in range(T):
             z = np.concatenate([X[:, t:t + 1], h], axis=1)
             g = z @ self.W + self.b
-            i, f, o = self._sig(g[:, :H]), self._sig(g[:, H:2 * H]), self._sig(g[:, 2 * H:3 * H])
-            u = np.tanh(g[:, 3 * H:])
+            i, f, o = self._sig(g[:, :H]), self._sig(g[:, H:2*H]), self._sig(g[:, 2*H:3*H])
+            u = np.tanh(g[:, 3*H:])
             c_new = f * c + i * u
             h_new = o * np.tanh(c_new)
             cache.append((z, i, f, o, u, c, c_new))
@@ -78,7 +123,7 @@ class LSTMModel:
         self.sc = StandardScaler().fit(X)
         Xs = self.sc.transform(X); H = self.H
         r = np.random.default_rng(42)
-        self.W = r.normal(0, .3, (1 + H, 4 * H)); self.b = np.zeros(4 * H); self.b[H:2 * H] = 1.0
+        self.W = r.normal(0, .3, (1 + H, 4 * H)); self.b = np.zeros(4 * H); self.b[H:2*H] = 1.0
         self.V = r.normal(0, .3, H); self.d = 0.0
         params = ["W", "b", "V", "d"]
         m = {k: 0 for k in params}; v = {k: 0 for k in params}
@@ -96,15 +141,15 @@ class LSTMModel:
                 do = dh * tc
                 dc = dc + dh * o * (1 - tc ** 2)
                 di, df, du = dc * u, dc * c_prev, dc * i
-                dg = np.concatenate([di * i * (1 - i), df * f * (1 - f), do * o * (1 - o), du * (1 - u ** 2)], axis=1)
+                dg = np.concatenate([di*i*(1-i), df*f*(1-f), do*o*(1-o), du*(1-u**2)], axis=1)
                 gW += z.T @ dg; gb += dg.sum(0)
                 dz = dg @ self.W.T
                 dh = dz[:, 1:]; dc = dc * f
             grads = {"W": gW, "b": gb, "V": gV, "d": gd}
             for k in params:
-                m[k] = .9 * m[k] + .1 * grads[k]; v[k] = .999 * v[k] + .001 * grads[k] ** 2
-                mh = m[k] / (1 - .9 ** ep); vh = v[k] / (1 - .999 ** ep)
-                setattr(self, k, getattr(self, k) - lr * mh / (np.sqrt(vh) + 1e-8))
+                m[k] = .9*m[k] + .1*grads[k]; v[k] = .999*v[k] + .001*grads[k]**2
+                mh = m[k]/(1-.9**ep); vh = v[k]/(1-.999**ep)
+                setattr(self, k, getattr(self, k) - lr*mh/(np.sqrt(vh)+1e-8))
         return self
 
     def score(self, X):
@@ -115,83 +160,141 @@ class LSTMModel:
         return (self.score(X) > 0.5).astype(int)
 
 
-# ----------------------------------------------------------------------- VQC
+# DNN 
+class DNNModel:
+    """3-layer fully-connected MLP using NumPy + Adam.
+    Architecture: input(4) → hidden1(32, ReLU) → hidden2(16, ReLU) → output(1, sigmoid)
+    """
+    name = "DNN"
+
+    @staticmethod
+    def _relu(x): return np.maximum(0, x)
+
+    @staticmethod
+    def _relu_grad(x): return (x > 0).astype(float)
+
+    @staticmethod
+    def _sig(x): return 1 / (1 + np.exp(-np.clip(x, -30, 30)))
+
+    def fit(self, X, y, epochs=400, lr=0.005):
+        self.sc = StandardScaler().fit(X)
+        Xs = self.sc.transform(X)
+        rng = np.random.default_rng(42)
+
+        # He initialisation
+        self.W1 = rng.normal(0, (2/4)**0.5,  (4,  32)); self.b1 = np.zeros(32)
+        self.W2 = rng.normal(0, (2/32)**0.5, (32, 16)); self.b2 = np.zeros(16)
+        self.W3 = rng.normal(0, (2/16)**0.5, (16,  1)); self.b3 = np.zeros(1)
+
+        params = ["W1", "b1", "W2", "b2", "W3", "b3"]
+        ma = {k: 0 for k in params}
+        va = {k: 0 for k in params}
+        sw = np.where(y==1, (y==0).sum()/max(1,(y==1).sum()), 1.0).reshape(-1, 1)
+        yv = y.reshape(-1, 1).astype(float)
+
+        for ep in range(1, epochs + 1):
+            # Forward pass
+            a1 = self._relu(Xs @ self.W1 + self.b1)
+            a2 = self._relu(a1 @ self.W2 + self.b2)
+            a3 = self._sig( a2 @ self.W3 + self.b3)
+
+            # Backward pass
+            dl  = sw * (a3 - yv) / len(y)
+            dW3 = a2.T @ dl;                           db3 = dl.sum(0)
+            da2 = (dl @ self.W3.T) * self._relu_grad(a1 @ self.W2 + self.b2)
+            dW2 = a1.T @ da2;                          db2 = da2.sum(0)
+            da1 = (da2 @ self.W2.T) * self._relu_grad(Xs @ self.W1 + self.b1)
+            dW1 = Xs.T @ da1;                          db1 = da1.sum(0)
+
+            grads = {"W1":dW1,"b1":db1,"W2":dW2,"b2":db2,"W3":dW3,"b3":db3}
+            for k in params:   # Adam optimiser
+                ma[k] = .9*ma[k] + .1*grads[k]
+                va[k] = .999*va[k] + .001*grads[k]**2
+                mh = ma[k]/(1-.9**ep); vh = va[k]/(1-.999**ep)
+                setattr(self, k, getattr(self, k) - lr*mh/(np.sqrt(vh)+1e-8))
+        return self
+
+    def score(self, X):
+        Xs = self.sc.transform(X)
+        a1 = self._relu(Xs @ self.W1 + self.b1)
+        a2 = self._relu(a1 @ self.W2 + self.b2)
+        return self._sig(a2 @ self.W3 + self.b3).ravel()
+
+    def predict(self, X):
+        return (self.score(X) > 0.5).astype(int)
+
+
+# VQC
 class VQCModel:
-    """Variational quantum classifier: 4 qubits, angle encoding, 2 layers of
-    RY rotations + CNOT ring, output = <Z> on qubit 0. Simulated with NumPy
-    state vectors; trained with the parameter-shift rule."""
+    """4-qubit variational quantum classifier, simulated with NumPy."""
     name = "VQC (quantum)"
     NQ, LAYERS = 4, 2
 
     @staticmethod
     def _ry(t):
-        c, s = np.cos(t / 2), np.sin(t / 2)
+        c, s = np.cos(t/2), np.sin(t/2)
         return np.array([[c, -s], [s, c]])
 
     def _apply1(self, st, U, q):
-        st = np.moveaxis(st, q + 1, 1)
-        st = np.tensordot(st, U, axes=([1], [1]))  # (B, rest..., 2)
+        st = np.moveaxis(st, q+1, 1)
+        st = np.tensordot(st, U, axes=([1], [1]))
         st = np.moveaxis(st, -1, 1)
-        return np.moveaxis(st, 1, q + 1)
+        return np.moveaxis(st, 1, q+1)
 
     def _cnot(self, st, c, t):
         idx = [slice(None)] * st.ndim
-        idx[c + 1] = 1
+        idx[c+1] = 1
         sub = st[tuple(idx)]
-        ax = t + 1 - (1 if t > c else 0)
+        ax = t+1-(1 if t > c else 0)
         st = st.copy()
         st[tuple(idx)] = np.flip(sub, axis=ax)
         return st
 
     def _expval(self, X, w):
         B = len(X)
-        st = np.zeros((B,) + (2,) * self.NQ)
-        st[(slice(None),) + (0,) * self.NQ] = 1.0
-        for q in range(self.NQ):  # encoding: per-sample RY(x_q)
-            c, s = np.cos(X[:, q] / 2), np.sin(X[:, q] / 2)
-            U = np.stack([np.stack([c, -s], -1), np.stack([s, c], -1)], -2)  # (B,2,2)
-            st = np.moveaxis(st, q + 1, -1)
+        st = np.zeros((B,) + (2,)*self.NQ)
+        st[(slice(None),) + (0,)*self.NQ] = 1.0
+        for q in range(self.NQ):
+            c, s = np.cos(X[:,q]/2), np.sin(X[:,q]/2)
+            U = np.stack([np.stack([c,-s],-1), np.stack([s,c],-1)], -2)
+            st = np.moveaxis(st, q+1, -1)
             st = np.einsum("b...j,bij->b...i", st, U)
-            st = np.moveaxis(st, -1, q + 1)
+            st = np.moveaxis(st, -1, q+1)
         w = w.reshape(self.LAYERS, self.NQ)
         for l in range(self.LAYERS):
-            for q in range(self.NQ):
-                st = self._apply1(st, self._ry(w[l, q]), q)
-            for q in range(self.NQ):
-                st = self._cnot(st, q, (q + 1) % self.NQ)
-        p = (st ** 2)
-        p0 = p.sum(axis=tuple(range(2, self.NQ + 1)))  # prob of qubit0 in |0>,|1>
-        return p0[:, 0] - p0[:, 1]  # <Z> in [-1, 1]
+            for q in range(self.NQ): st = self._apply1(st, self._ry(w[l,q]), q)
+            for q in range(self.NQ): st = self._cnot(st, q, (q+1)%self.NQ)
+        p  = st**2
+        p0 = p.sum(axis=tuple(range(2, self.NQ+1)))
+        return p0[:,0] - p0[:,1]
 
     def fit(self, X, y, iters=60, lr=0.4):
         self.sc = StandardScaler().fit(X)
-        Z = np.tanh(self.sc.transform(X)) * np.pi / 2
-        t = np.where(y == 1, -1.0, 1.0)  # anomaly -> -1
+        Z = np.tanh(self.sc.transform(X)) * np.pi/2
+        t = np.where(y==1, -1.0, 1.0)
         rng = np.random.default_rng(42)
-        w = rng.normal(0, 0.5, self.LAYERS * self.NQ)
-        cw = np.where(y == 1, (y == 0).sum() / max(1, (y == 1).sum()), 1.0)
+        w = rng.normal(0, 0.5, self.LAYERS*self.NQ)
+        cw = np.where(y==1, (y==0).sum()/max(1,(y==1).sum()), 1.0)
         for _ in range(iters):
-            f = self._expval(Z, w)
-            g = np.zeros_like(w)
+            f = self._expval(Z, w); g = np.zeros_like(w)
             for i in range(len(w)):
                 wp, wm = w.copy(), w.copy()
-                wp[i] += np.pi / 2
-                wm[i] -= np.pi / 2
-                df = (self._expval(Z, wp) - self._expval(Z, wm)) / 2
-                g[i] = np.mean(cw * 2 * (f - t) * df)
-            w -= lr * g
+                wp[i] += np.pi/2; wm[i] -= np.pi/2
+                df = (self._expval(Z,wp) - self._expval(Z,wm)) / 2
+                g[i] = np.mean(cw * 2*(f-t)*df)
+            w -= lr*g
         self.w = w
         return self
 
     def score(self, X):
-        Z = np.tanh(self.sc.transform(X)) * np.pi / 2
-        return -self._expval(Z, self.w)  # higher = more anomalous
+        Z = np.tanh(self.sc.transform(X)) * np.pi/2
+        return -self._expval(Z, self.w)
 
     def predict(self, X):
         return (self.score(X) > 0).astype(int)
 
 
-# ------------------------------------------------------------------ pipeline
+# pipeline
 def _xy(df):
     X = df[FEATURES].to_numpy(dtype=float)
     y = (df["label"].astype(str).str.lower() == "anomaly").astype(int).to_numpy()
@@ -199,7 +302,30 @@ def _xy(df):
 
 
 def _metrics(y, p):
-    return {"accuracy": round(float(accuracy_score(y, p)), 3), "f1": round(float(f1_score(y, p, zero_division=0)), 3)}
+    return {
+        "accuracy": round(float(accuracy_score(y, p)), 3),
+        "f1":       round(float(f1_score(y, p, zero_division=0)), 3)
+    }
+
+
+SUPERVISED = (SVMModel, RandomForestModel, KNNModel, LSTMModel, DNNModel, VQCModel)
+
+TAGS = {
+    "Linear SVM":    "svm",
+    "Random Forest": "rf",
+    "KNN":           "knn",
+    "LSTM":          "lstm",
+    "DNN":           "dnn",
+    "VQC (quantum)": "vqc",
+}
+KIND = {
+    "Linear SVM":    "Classical ML",
+    "Random Forest": "Classical ML",
+    "KNN":           "Classical ML",
+    "LSTM":          "Deep Learning",
+    "DNN":           "Deep Learning",
+    "VQC (quantum)": "Quantum ML",
+}
 
 
 @lru_cache(maxsize=1)
@@ -207,15 +333,11 @@ def trained_models():
     X, y = _xy(demo_dataframe(seed=7, n=400, na=100))
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
     models, metrics = [], {}
-    for cls in (SVMModel, LSTMModel, VQCModel):
+    for cls in SUPERVISED:
         m = cls().fit(Xtr, ytr)
         metrics[m.name] = _metrics(yte, m.predict(Xte))
         models.append(m)
     return models, metrics
-
-
-TAGS = {"Linear SVM": "svm", "LSTM": "lstm", "VQC (quantum)": "vqc"}
-KIND = {"Linear SVM": "Classical ML", "LSTM": "Deep Learning", "VQC (quantum)": "Quantum ML"}
 
 
 def predict_dataframe(df):
@@ -224,6 +346,7 @@ def predict_dataframe(df):
     missing = [c for c in FEATURES if c not in X.columns]
     if missing:
         raise ValueError("Missing required columns: " + ", ".join(missing))
+
     F = X[FEATURES].apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
     F = pd.DataFrame(SimpleImputer(strategy="median").fit_transform(F), columns=FEATURES)
     Fv = F.to_numpy()
@@ -231,45 +354,50 @@ def predict_dataframe(df):
     lab = next((c for c in X.columns if c in LABELS), None)
     y_true = None
     if lab is not None:
-        yy = (X[lab].astype(str).str.strip().str.lower().isin({"anomaly", "1", "true", "abnormal"})).astype(int).to_numpy()
-        if yy.sum() >= 1 and (yy == 0).sum() >= 1 and len(yy) >= 4:
+        yy = (X[lab].astype(str).str.strip().str.lower().isin({"anomaly","1","true","abnormal"})).astype(int).to_numpy()
+        if yy.sum() >= 1 and (yy==0).sum() >= 1 and len(yy) >= 4:
             y_true = yy
 
-    if y_true is not None:   # train all three on the uploaded labelled data
-        models = [cls().fit(Fv, y_true) for cls in (SVMModel, LSTMModel, VQCModel)]
-        basis = "Trained on the uploaded labelled data; metrics are in-sample (vs. the label column)."
-    else:                    # fall back to models trained on the synthetic demo set
+    if y_true is not None:
+        models = [cls().fit(Fv, y_true) for cls in SUPERVISED]
+        basis  = "Trained on uploaded labelled data; metrics are in-sample."
+    else:
         models, held = trained_models()
-        basis = "Pre-trained on synthetic demo data (no usable label column); metrics are from a held-out split of that data."
+        basis = "Pre-trained on synthetic demo data; metrics are from a held-out split."
 
-    out = df.copy()
+    out   = df.copy()
     votes = np.zeros(len(out), dtype=int)
     comparison = []
+
     for m in models:
         p = m.predict(Fv)
         votes += p
-        out[f"{TAGS[m.name]}_prediction"] = np.where(p == 1, "Anomaly", "Normal")
+        out[f"{TAGS[m.name]}_prediction"] = np.where(p==1, "Anomaly", "Normal")
         row = {"model": m.name, "type": KIND[m.name], "flagged": int(p.sum())}
         row.update(_metrics(y_true, p) if y_true is not None else held[m.name])
         comparison.append(row)
 
+    # Isolation Forest baseline
     iso = make_pipeline(StandardScaler(), IsolationForest(n_estimators=150, contamination="auto", random_state=42)).fit(Fv)
-    ip = (iso.predict(Fv) == -1).astype(int)
-    out["iforest_prediction"] = np.where(ip == 1, "Anomaly", "Normal")
-    out["anomaly_score"] = (-iso.decision_function(Fv)).round(6)
-    ens = (votes >= 2).astype(int)
-    out["prediction"] = np.where(ens == 1, "Anomaly", "Normal")
+    ip  = (iso.predict(Fv) == -1).astype(int)
+    out["iforest_prediction"] = np.where(ip==1, "Anomaly", "Normal")
+    out["anomaly_score"]      = (-iso.decision_function(Fv)).round(6)
+
+    # Majority vote — need 4 of 6
+    ens = (votes >= 4).astype(int)
+    out["prediction"] = np.where(ens==1, "Anomaly", "Normal")
+
     if y_true is not None:
-        comparison.append({"model": "Isolation Forest", "type": "Baseline (unsupervised)", "flagged": int(ip.sum()), **_metrics(y_true, ip)})
-        comparison.append({"model": "Ensemble (majority vote)", "type": "SVM + LSTM + VQC", "flagged": int(ens.sum()), **_metrics(y_true, ens)})
+        comparison.append({"model":"Isolation Forest",      "type":"Baseline (unsupervised)",       "flagged":int(ip.sum()),  **_metrics(y_true, ip)})
+        comparison.append({"model":"Ensemble (majority)",   "type":"SVM+RF+KNN+LSTM+DNN+VQC",       "flagged":int(ens.sum()), **_metrics(y_true, ens)})
     else:
-        comparison.append({"model": "Isolation Forest", "type": "Baseline (unsupervised)", "flagged": int(ip.sum()), "accuracy": "-", "f1": "-"})
-        comparison.append({"model": "Ensemble (majority vote)", "type": "SVM + LSTM + VQC", "flagged": int(ens.sum()), "accuracy": "-", "f1": "-"})
+        comparison.append({"model":"Isolation Forest",      "type":"Baseline (unsupervised)",       "flagged":int(ip.sum()),  "accuracy":"-","f1":"-"})
+        comparison.append({"model":"Ensemble (majority)",   "type":"SVM+RF+KNN+LSTM+DNN+VQC",       "flagged":int(ens.sum()), "accuracy":"-","f1":"-"})
 
     summary = {
-        "rows": len(out),
+        "rows":      len(out),
         "anomalies": int(ens.sum()),
-        "method": "Ensemble of Linear SVM (ML) + LSTM (DL) + VQC (QML), majority vote. " + basis,
+        "method":    "Ensemble: SVM + RF + KNN (Classical ML), LSTM + DNN (Deep Learning), VQC (Quantum ML) — majority vote. " + basis,
         "comparison": comparison,
     }
     return out, summary
